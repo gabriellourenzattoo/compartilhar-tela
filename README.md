@@ -1,0 +1,74 @@
+# Compartilhar Tela 🖥️
+
+Mostre sua tela pra um amigo direto do navegador — sem instalar nada, sem cadastro.
+
+**Como funciona:** você cria uma sala, recebe um link de 5 letras, manda pro seu amigo. Ele abre,
+você clica em *Compartilhar minha tela* e pronto. A tela vai **direto de você pra ele** (WebRTC
+P2P, criptografada DTLS-SRTP). O servidor só apresenta os dois — ele **nunca vê nem grava o vídeo**.
+
+## Recursos
+
+- 🎬 Compartilhamento de tela inteira, janela ou aba
+- 🔊 Áudio do sistema junto com a tela (Chrome/Edge)
+- 🎤 Microfone opcional, mixado com o áudio do sistema
+- ↔️ Qualquer um dos dois pode apresentar (negociação perfeita, sem conflito)
+- 💬 Chat de texto na lateral
+- 📊 Indicador de resolução / fps / bitrate em tempo real
+- 📱 Quem assiste pode usar o celular; quem apresenta precisa de computador
+- 🔁 Reconexão automática se a rede cair
+- ⛔ Sala limitada a 2 pessoas, código aleatório, descartada quando fica vazia
+
+## Rodando local
+
+```bash
+npm install
+npm start          # http://localhost:3000
+npm test           # 12 testes de integração do servidor de sinalização
+```
+
+> `getDisplayMedia` exige contexto seguro: use `https://` ou `http://localhost`.
+
+## Estrutura
+
+```
+server.js          servidor Express + WebSocket (só sinalização SDP/ICE + chat)
+public/index.html  interface
+public/app.js      cliente WebRTC
+public/styles.css  tema
+test/              testes (node:test)
+```
+
+## Deploy no Render
+
+Web service Node no plano free:
+
+| Campo | Valor |
+|---|---|
+| Build | `npm ci --omit=dev` |
+| Start | `node server.js` |
+| Health check | `/healthz` |
+| Porta | `$PORT` (Render injeta) |
+
+O serviço é stateless e roda em uma única instância, então as salas em memória funcionam sem
+Redis. Se você escalar para mais de uma instância, a sinalização precisa de um pub/sub.
+
+### Variáveis de ambiente (opcionais)
+
+| Nome | Uso |
+|---|---|
+| `TURN_URL` | `turn:host:3478` — melhora a conexão atrás de NATs restritivos |
+| `TURN_USERNAME` | usuário do TURN |
+| `TURN_CREDENTIAL` | senha do TURN |
+
+Sem TURN o app usa STUN público e funciona na maioria das redes; em NATs simétricos (algumas
+redes de empresa/celular) a conexão direta pode falhar.
+
+## Limitações do plano free do Render
+
+- Dorme após 15 min sem tráfego; o primeiro acesso depois leva ~1 min pra acordar.
+- Mensagens de WebSocket contam como tráfego, então uma tela sendo compartilhada mantém vivo.
+
+## Privacidade
+
+Nada é gravado. O servidor guarda apenas: código da sala, nome e papel (apresentador/espectador)
+dos dois participantes, em memória, até a sala esvaziar.

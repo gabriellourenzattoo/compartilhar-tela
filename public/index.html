@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Compartilhar Tela — mostre sua tela pra um amigo</title>
+<meta name="description" content="Compartilhe sua tela com um amigo direto do navegador. Sem instalar nada, conexão direta e criptografada (WebRTC)." />
+<meta name="theme-color" content="#0b0f19" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234f7cff'/><rect x='18' y='26' width='64' height='42' rx='6' fill='none' stroke='white' stroke-width='7'/><path d='M40 78h20' stroke='white' stroke-width='7' stroke-linecap='round'/></svg>" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ============ LOBBY ============ -->
+<section id="lobby" class="lobby">
+  <div class="lobby-card">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <rect x="2" y="4" width="20" height="13" rx="2.5" /><path d="M8 21h8M12 17v4" />
+        </svg>
+      </div>
+      <div>
+        <h1>Compartilhar Tela</h1>
+        <p class="brand-sub">Mostre sua tela pra um amigo. Sem instalar nada.</p>
+      </div>
+    </div>
+
+    <form id="lobbyForm" autocomplete="off">
+      <label class="field">
+        <span>Seu nome</span>
+        <input id="nameInput" maxlength="32" placeholder="ex.: Gabriel" required />
+      </label>
+
+      <div class="lobby-actions">
+        <button type="submit" class="btn btn-primary btn-block">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Criar uma sala
+        </button>
+      </div>
+
+      <div class="divider"><span>ou entrar com um código</span></div>
+
+      <div class="join-row">
+        <input id="codeInput" maxlength="5" placeholder="ABC2D" class="code-input" spellcheck="false" />
+        <button type="button" id="joinBtn" class="btn btn-ghost">Entrar</button>
+      </div>
+    </form>
+
+    <ul class="lobby-notes">
+      <li>🔒 A tela vai direto de você pro seu amigo (WebRTC). O servidor só apresenta os dois.</li>
+      <li>💻 Quem apresenta precisa de um computador; quem assiste pode usar o celular.</li>
+      <li>🎧 Dá pra mandar o som do sistema junto, e o seu microfone se quiser.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ SALA ============ -->
+<main id="room" class="room hidden" aria-hidden="true">
+  <header class="topbar">
+    <div class="topbar-left">
+      <button id="backBtn" class="icon-btn" title="Sair da sala" aria-label="Sair da sala">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="room-id" id="roomIdChip" title="Copiar link da sala">
+        <span class="room-id-label">sala</span>
+        <strong id="roomCode">-----</strong>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+      </div>
+    </div>
+
+    <div class="topbar-right">
+      <span class="pill" id="connPill"><i class="dot"></i><span id="connText">conectando…</span></span>
+      <span class="pill pill-people" id="peoplePill">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><path d="M16 5.2A3.2 3.2 0 0 1 16 11M18 14.6c2 .8 3 2.6 3 5.4"/></svg>
+        <span id="peopleCount">1</span>
+      </span>
+    </div>
+  </header>
+
+  <div class="stage">
+    <section class="viewer-pane">
+      <div class="video-wrap" id="videoWrap">
+        <video id="remoteVideo" autoplay playsinline muted></video>
+
+        <div class="video-overlay" id="videoOverlay">
+          <div class="overlay-inner">
+            <div class="pulse-ring" aria-hidden="true"></div>
+            <p id="overlayTitle">Esperando seu amigo entrar…</p>
+            <p class="overlay-sub" id="overlaySub">Envie o link da sala pra ele.</p>
+            <button class="btn btn-primary" id="shareBtnOverlay">Compartilhar minha tela</button>
+          </div>
+        </div>
+
+        <div class="video-meta" id="videoMeta"></div>
+
+        <div class="local-pip" id="localPip">
+          <video id="localVideo" autoplay playsinline muted></video>
+          <span class="pip-label">sua tela</span>
+        </div>
+      </div>
+
+      <div class="controlbar">
+        <button class="btn btn-primary" id="shareBtn">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="4" width="20" height="13" rx="2.5"/><path d="M8 21h8M12 17v4"/></svg>
+          <span id="shareBtnLabel">Compartilhar minha tela</span>
+        </button>
+
+        <button class="btn btn-ghost" id="micBtn" title="Enviar seu microfone junto" disabled>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          <span id="micLabel">Microfone</span>
+        </button>
+
+        <button class="btn btn-ghost" id="soundBtn" title="Ligar/desligar o som recebido">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M17 9.5a4 4 0 0 1 0 5" id="soundArc"/></svg>
+          <span id="soundLabel">Som</span>
+        </button>
+
+        <button class="btn btn-ghost" id="fsBtn" title="Tela cheia">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+          <span class="hide-sm">Tela cheia</span>
+        </button>
+
+        <button class="btn btn-danger" id="stopBtn" hidden>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          Parar
+        </button>
+      </div>
+    </section>
+
+    <aside class="sidepane">
+      <div class="side-head">
+        <h2>Conversa</h2>
+        <span class="side-count" id="peerName">só você</span>
+      </div>
+      <div class="chat-log" id="chatLog" aria-live="polite"></div>
+      <form class="chat-form" id="chatForm">
+        <input id="chatInput" maxlength="2000" placeholder="Escreva uma mensagem…" autocomplete="off" />
+        <button class="icon-btn icon-btn-send" type="submit" aria-label="Enviar mensagem">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 3L10.5 13.5M21 3l-6.8 18-3.7-7.5L3 9.8 21 3z"/></svg>
+        </button>
+      </form>
+    </aside>
+  </div>
+</main>
+
+<div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+
+<template id="msgTpl">
+  <div class="msg">
+    <span class="msg-who"></span>
+    <p class="msg-text"></p>
+    <time class="msg-time"></time>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>
