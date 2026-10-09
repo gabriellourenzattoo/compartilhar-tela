@@ -247,11 +247,16 @@ async function scenario(title, fn) {
     await a.evaluate(() => { window.__wsBefore = window.__ct.ws; window.__ct.ws.close(); });
     // waitForFunction com polling default usa requestAnimationFrame, que não roda
     // em aba não visível — por isso o helper usa polling numérico.
-    const reconnected = await waitFor(a, () =>
-      window.__ct.ws !== window.__wsBefore && window.__ct.ws?.readyState === 1 && window.__ct.selfId !== null, 30000);
-    check('A reconectou com um socket novo', reconnected);
+    // Espera o welcome de verdade: só o socket aberto não basta, a identidade
+    // nova vem na mensagem seguinte. Esperar por selfId !== selfBefore cobre as
+    // duas coisas e não dá corrida.
+    const rejoined = await waitFor(a, (before) =>
+      window.__ct.ws !== window.__wsBefore
+      && window.__ct.ws?.readyState === 1
+      && window.__ct.selfId !== before, 40000, selfBefore);
     const newSelf = await a.evaluate(() => window.__ct.selfId);
-    check('A ganhou identidade nova no servidor', newSelf !== selfBefore, `${selfBefore?.slice(0, 6)} → ${newSelf?.slice(0, 6)}`);
+    check('A reconectou e o servidor lhe deu identidade nova', rejoined,
+      rejoined ? `${selfBefore?.slice(0, 6)} → ${newSelf?.slice(0, 6)}` : `selfId travado em ${newSelf?.slice(0, 6)}`);
 
     const role = await waitFor(b, () => [...window.__ct.peers.values()].some((p) => p.role === 'presenter'), 20000);
     check('B volta a ver A como apresentador', role,
