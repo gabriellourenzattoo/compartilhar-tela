@@ -284,12 +284,10 @@
           // Se a gente já estava nessa sala, é o nosso próprio socket antigo que
           // ainda não foi liberado (o proxy segura o close por alguns segundos).
           // Insistir resolve sozinho; desistir expulsaria você da própria sala.
-          const reconnecting = state.joinedOnce && Date.now() - state.roomFullSince < 30000;
-          if (reconnecting) {
-            if (!state.roomFullSince) {
-              state.roomFullSince = Date.now();
-              toast('Reconectando à sala…', '', 2500);
-            }
+          if (state.roomFullSince === 0) state.roomFullSince = Date.now();
+          const insistir = state.joinedOnce && Date.now() - state.roomFullSince < 30000;
+          if (insistir) {
+            setConn('off', 'reconectando…');
             scheduleReconnect();
           } else {
             toast('A sala já está cheia (2 pessoas).', 'err', 8000);
@@ -707,9 +705,12 @@
 
   window.addEventListener('beforeunload', () => { if (state.presenting) send({ type: 'stopped' }); });
 
-  /* hook de depuração/testes */
+  /* Hooks de teste. __ctFeed injeta uma mensagem de sinalização falsa, o que
+   * permite testar caminhos que só acontecem atrás de um proxy (room-full numa
+   * reconexão) sem precisar simular a rede. */
   window.__ct = state;
   window.__ctRemote = remoteStream;
+  window.__ctFeed = onSignal;
 
   /* ---------------- estatísticas ---------------- */
   let lastBytes = 0;

@@ -266,6 +266,43 @@ async function scenario(title, fn) {
     }
   });
 
+  // ---------- 7. room-full durante reconexão não expulsa da própria sala ----------
+  await scenario('7. "sala cheia" na reconexão insiste; terceiro de verdade é barrado', async (browser) => {
+    const a = await open(browser, 'A');
+    const code = await enterRoom(a, 'Gabriel');
+    const b = await open(browser, 'B');
+    await enterRoom(b, 'Amigo', code);
+    await waitFor(b, () => document.getElementById('peopleCount').textContent === '2', 10000);
+
+    // (a) quem já estava na sala insiste em vez de ser expulso.
+    // Injetado de propósito: atrás do proxy do Render o socket antigo segura a
+    // vaga por uns segundos; localmente isso não acontece, então o caminho
+    // nunca seria exercitado sem a injeção.
+    await a.evaluate(() => {
+      window.__ct.joinedOnce = true;
+      window.__ct.roomFullSince = 0;
+      window.__ctFeed({ type: 'error', code: 'room-full' });
+    });
+    await new Promise((r) => setTimeout(r, 600));
+    check('quem já estava na sala NÃO volta pro lobby',
+      await a.evaluate(() => document.getElementById('lobby').classList.contains('hidden')));
+    check('e continua tentando reconectar',
+      await a.evaluate(() => window.__ct.manualExit === false && window.__ct.roomFullSince > 0));
+
+    // (b) terceiro de verdade, com a sala cheia de fato, é barrado
+    const c = await open(browser, 'C');
+    await setVal(c, '#nameInput', 'Intruso');
+    await setVal(c, '#codeInput', code);
+    await click(c, '#joinBtn');
+    const kicked = await waitFor(c, () => window.__ct.manualExit === true, 15000);
+    check('terceiro de verdade é barrado', kicked,
+      kicked ? '' : `estado C: ${JSON.stringify(await c.evaluate(() => ({ joined: window.__ct.joinedOnce, exit: window.__ct.manualExit })))}`);
+    check('e o terceiro vê o aviso de sala cheia',
+      await c.evaluate(() => [...document.querySelectorAll('.toast')].some((t) => /cheia/.test(t.textContent))));
+    check('a sala continua com 2 pessoas',
+      await b.evaluate(() => document.getElementById('peopleCount').textContent === '2'));
+  });
+
   console.log(`\n${failures === 0 ? 'TUDO PASSOU' : `${failures} FALHA(S)`}`);
   process.exit(failures === 0 ? 0 : 1);
 })();
