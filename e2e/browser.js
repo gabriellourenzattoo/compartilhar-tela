@@ -31,10 +31,18 @@ function check(name, ok, detail = '') {
   if (!ok) failures++;
 }
 
+const openedPages = [];
+
 async function open(browser, label) {
   const page = await browser.newPage();
   page.__label = label;
-  page.on('pageerror', (e) => console.log(`    [pageerror ${label}] ${e.message}`));
+  page.__errors = [];
+  openedPages.push(page);
+  // Qualquer exceção não tratada no cliente é falha do teste.
+  page.on('pageerror', (e) => {
+    page.__errors.push(e.message);
+    console.log(`    [pageerror ${label}] ${e.message}`);
+  });
   page.on('console', (m) => {
     if (m.type() === 'error') console.log(`    [console ${label}] ${m.text().slice(0, 200)}`);
   });
@@ -94,6 +102,7 @@ const view = () => ({
 
 async function scenario(title, fn) {
   console.log(`\n▶ ${title}`);
+  openedPages.length = 0;
   const browser = await puppeteer.launch({ headless: true, args: ARGS, protocolTimeout: 60000 });
   try {
     await fn(browser);
@@ -101,6 +110,8 @@ async function scenario(title, fn) {
     console.log(`  ✖ exceção: ${e.message}`);
     failures++;
   } finally {
+    const errs = openedPages.flatMap((p) => (p.__errors || []).map((m) => `${p.__label}: ${m}`));
+    check('nenhuma exceção de JS na página', errs.length === 0, errs.join(' | '));
     await browser.close();
   }
 }

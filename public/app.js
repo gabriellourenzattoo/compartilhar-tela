@@ -43,6 +43,7 @@
     displayStream: null, micStream: null, mixer: null,
     presenting: false, otherId: null, peerSig: '',
     makingOffer: false, soundOn: true, soundBlocked: false, restarts: 0,
+    joinedOnce: false, roomFullSince: 0,
   };
 
   // Acumula as trilhas recebidas. Precisa ser UM stream só: o ontrack dispara uma
@@ -154,6 +155,9 @@
     state.ws = null;
     state.peers.clear();
     state.peerSig = '';
+    state.otherId = null;
+    state.joinedOnce = false;
+    state.roomFullSince = 0;
     teardownPC();
 
     el.room.classList.add('hidden');
@@ -214,6 +218,8 @@
     switch (m.type) {
       case 'welcome':
         state.selfId = m.selfId;
+        state.joinedOnce = true;
+        state.roomFullSince = 0;
         state.peers.clear();
         for (const p of m.peers) state.peers.set(p.id, { name: p.name, role: p.role });
         syncOther();
@@ -275,8 +281,20 @@
 
       case 'error':
         if (m.code === 'room-full') {
-          toast('A sala já está cheia (2 pessoas).', 'err', 8000);
-          leaveRoom();
+          // Se a gente já estava nessa sala, é o nosso próprio socket antigo que
+          // ainda não foi liberado (o proxy segura o close por alguns segundos).
+          // Insistir resolve sozinho; desistir expulsaria você da própria sala.
+          const reconnecting = state.joinedOnce && Date.now() - state.roomFullSince < 30000;
+          if (reconnecting) {
+            if (!state.roomFullSince) {
+              state.roomFullSince = Date.now();
+              toast('Reconectando à sala…', '', 2500);
+            }
+            scheduleReconnect();
+          } else {
+            toast('A sala já está cheia (2 pessoas).', 'err', 8000);
+            leaveRoom();
+          }
         }
         break;
 
@@ -601,8 +619,9 @@
 
   /* ---------------- UI ---------------- */
   function refreshUI() {
-    const someone = !!state.otherId;
-    const other = state.otherId && state.peers.get(state.otherId);
+    // otherId pode apontar para alguém que já saiu: nunca confie nele sozinho.
+    const other = (state.otherId && state.peers.get(state.otherId)) || null;
+    const someone = !!other;
     const remotePresenting = other?.role === 'presenter';
 
     el.peopleCount.textContent = String(state.peers.size + 1);

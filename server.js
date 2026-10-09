@@ -15,7 +15,9 @@ const { WebSocketServer } = require('ws');
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_PEERS_PER_ROOM = 2;
 const ROOM_IDLE_MS = 1000 * 60 * 5; // sala vazia é descartada após 5 min
-const HEARTBEAT_MS = 25000;
+// Curto de propósito: atrás do proxy do Render um socket morto pode demorar a
+// ser notificado, e enquanto isso ele ocupa vaga na sala.
+const HEARTBEAT_MS = 10000;
 const MAX_MESSAGE_BYTES = 64 * 1024; // SDP/ICE são pequenos; chat é truncado
 const MAX_CHAT_CHARS = 2000;
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sem chars ambíguos (0/O, 1/I)
