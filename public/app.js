@@ -183,7 +183,9 @@
     ws.onopen = () => {
       state.attempt = 0;
       setConn('live', 'online');
-      ws.send(JSON.stringify({ type: 'join', name: state.name }));
+      // presenting vai junto: depois de uma reconexão o servidor volta a saber
+      // que somos nós quem está apresentando.
+      ws.send(JSON.stringify({ type: 'join', name: state.name, presenting: state.presenting }));
     };
 
     ws.onmessage = (ev) => {
@@ -215,6 +217,10 @@
         state.peers.clear();
         for (const p of m.peers) state.peers.set(p.id, { name: p.name, role: p.role });
         syncOther();
+        // (Re)conectamos: força a reconstrução da peer connection e uma oferta
+        // nova, mesmo que seja a mesma pessoa do outro lado.
+        state.peerSig = '';
+        if (state.presenting) send({ type: 'role', payload: 'presenter' });
         maybePeerChange();
         refreshUI();
         break;

@@ -220,6 +220,41 @@ async function scenario(title, fn) {
     check('B nunca perdeu o stream', await b.evaluate(() => !!document.getElementById('remoteVideo').srcObject));
   });
 
+  // ---------- 6. queda do WebSocket no meio da apresentação ----------
+  await scenario('6. queda do WebSocket no meio da apresentação se recupera sozinha', async (browser) => {
+    const a = await open(browser, 'A');
+    const code = await enterRoom(a, 'Gabriel');
+    const b = await open(browser, 'B');
+    await enterRoom(b, 'Amigo', code);
+
+    await click(a, '#shareBtn');
+    const before = await waitFor(b, hasRemoteVideo, 25000);
+    check('vídeo chega antes da queda', before);
+
+    // derruba o socket de A de propósito (o que o plano free do Render faz sozinho)
+    const selfBefore = await a.evaluate(() => window.__ct.selfId);
+    await a.evaluate(() => { window.__wsBefore = window.__ct.ws; window.__ct.ws.close(); });
+    // waitForFunction com polling default usa requestAnimationFrame, que não roda
+    // em aba não visível — por isso o helper usa polling numérico.
+    const reconnected = await waitFor(a, () =>
+      window.__ct.ws !== window.__wsBefore && window.__ct.ws?.readyState === 1 && window.__ct.selfId !== null, 30000);
+    check('A reconectou com um socket novo', reconnected);
+    const newSelf = await a.evaluate(() => window.__ct.selfId);
+    check('A ganhou identidade nova no servidor', newSelf !== selfBefore, `${selfBefore?.slice(0, 6)} → ${newSelf?.slice(0, 6)}`);
+
+    const role = await waitFor(b, () => [...window.__ct.peers.values()].some((p) => p.role === 'presenter'), 20000);
+    check('B volta a ver A como apresentador', role,
+      role ? '' : `papéis: ${JSON.stringify(await b.evaluate(() => [...window.__ct.peers.values()]))}`);
+
+    const back = await waitFor(b, hasRemoteVideo, 30000);
+    check('B volta a ver a tela depois da queda', back,
+      back ? '' : `estado B: ${JSON.stringify(await b.evaluate(view))}`);
+    if (back) {
+      const f = await framesAdvancing(b);
+      check('e os quadros voltam a avançar', f.advancing, `decodificados ${f.a} → ${f.b}`);
+    }
+  });
+
   console.log(`\n${failures === 0 ? 'TUDO PASSOU' : `${failures} FALHA(S)`}`);
   process.exit(failures === 0 ? 0 : 1);
 })();

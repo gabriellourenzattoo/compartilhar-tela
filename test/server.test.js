@@ -198,6 +198,25 @@ test('a sala é descartada quando fica vazia', async () => {
   assert.equal(rooms.has(room), false, 'sala removida do mapa');
 });
 
+test('join com presenting=true entra como apresentador (reconexão)', async () => {
+  const room = newRoomCode();
+  const a = client(room, 'A');
+  const b = client(room, 'B');
+  await a.join();
+
+  // B "reconecta" já no meio de uma apresentação: o papel não pode se perder.
+  await b.opened;
+  b.send({ type: 'join', name: 'B', presenting: true });
+  await b.waitFor('welcome');
+
+  const presence = await a.waitFor('presence');
+  const bPeer = presence.peers.find((p) => p.name === 'B');
+  assert.ok(bPeer, 'A enxerga B');
+  assert.equal(bPeer.role, 'presenter', 'B entrou já como apresentador');
+
+  a.close(); b.close();
+});
+
 test('terceira pessoa é recusada (sala é 1:1)', async () => {
   const room = newRoomCode();
   const a = client(room, 'A');

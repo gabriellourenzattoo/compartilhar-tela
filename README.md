@@ -23,7 +23,7 @@ P2P, criptografada DTLS-SRTP). O servidor só apresenta os dois — ele **nunca 
 ```bash
 npm install
 npm start          # http://localhost:3000
-npm test           # 13 testes de integração do servidor de sinalização
+npm test           # 14 testes de integração do servidor de sinalização
 ```
 
 > `getDisplayMedia` exige contexto seguro: use `https://` ou `http://localhost`.
@@ -32,7 +32,8 @@ npm test           # 13 testes de integração do servidor de sinalização
 
 **Servidor** (`npm test`) — sobe o servidor numa porta efêmera e valida o protocolo de
 sinalização: entrada na sala, retransmissão de SDP/ICE só para o outro participante, chat,
-`peer-left` com o papel de quem saiu, sala 1:1, descarte de sala vazia, códigos inválidos e `/config`.
+`peer-left` com o papel de quem saiu, sala 1:1, descarte de sala vazia, códigos inválidos,
+reconexão de quem já estava apresentando e `/config`.
 
 **Navegador** (`e2e/browser.js`) — dois Chromium headless com dispositivos de mídia falsos
 compartilham tela **de verdade**, ponta a ponta. Cobre:
@@ -42,6 +43,8 @@ compartilham tela **de verdade**, ponta a ponta. Cobre:
 3. A para e volta a compartilhar → B volta a ver
 4. Chat vai e volta
 5. Ligar/desligar o microfone no meio da apresentação não derruba o vídeo
+6. Queda do WebSocket no meio da apresentação se recupera sozinha (o papel de
+   apresentador sobrevive à reconexão e a tela volta)
 
 ```bash
 npm i -D puppeteer        # uma vez; não está nas deps pra não pesar o build

@@ -106,6 +106,9 @@ function handleJoin(ws, room, payload) {
   }
   const peer = new Peer(ws, room.code, crypto.randomUUID());
   peer.name = String(payload?.name || 'Anônimo').slice(0, 32) || 'Anônimo';
+  // O papel vem junto no join: se o WebSocket cair e reconectar no meio de uma
+  // apresentação, o servidor não pode esquecer que essa pessoa é quem apresenta.
+  peer.role = payload?.presenting ? 'presenter' : 'viewer';
   room.peers.add(peer);
   touch(room);
 
