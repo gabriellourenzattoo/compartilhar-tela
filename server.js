@@ -133,6 +133,15 @@ app.get('/api/salas/nova', (_req, res) => {
   res.json({ room: code });
 });
 
+// Expõe o TURN (se configurado) para o cliente. Nada secreto aqui: as credenciais
+// de TURN são, por natureza, entregues ao navegador.
+app.get('/config', (_req, res) => {
+  const url = process.env.TURN_URL;
+  res.json({
+    turn: url ? { url, username: process.env.TURN_USERNAME || '', credential: process.env.TURN_CREDENTIAL || '' } : null,
+  });
+});
+
 app.get('/sala/:code', (req, res) => {
   const code = normalizeCode(req.params.code);
   if (!code) return res.status(400).send('Código de sala inválido.');

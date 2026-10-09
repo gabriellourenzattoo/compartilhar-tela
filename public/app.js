@@ -8,6 +8,7 @@
   const el = {
     lobby: $('lobby'), room: $('room'), lobbyForm: $('lobbyForm'),
     nameInput: $('nameInput'), codeInput: $('codeInput'), joinBtn: $('joinBtn'),
+    createBtnLabel: $('createBtnLabel'),
     roomCode: $('roomCode'), roomIdChip: $('roomIdChip'), backBtn: $('backBtn'),
     connPill: $('connPill'), connText: $('connText'), peopleCount: $('peopleCount'),
     remoteVideo: $('remoteVideo'), localVideo: $('localVideo'), localPip: $('localPip'),
@@ -24,19 +25,32 @@
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
   ];
-  // Opcional: configure um TURN no Render (TURN_URL / TURN_USERNAME / TURN_CREDENTIAL)
-  if (window.__TURN_URL__) {
-    ICE_SERVERS.push({ urls: window.__TURN_URL__, username: window.__TURN_USERNAME__, credential: window.__TURN_CREDENTIAL__ });
-  }
+  // TURN opcional vem do servidor (TURN_URL/TURN_USERNAME/TURN_CREDENTIAL no Render).
+  fetch('/config')
+    .then((r) => r.json())
+    .then((c) => {
+      if (c?.turn?.url) ICE_SERVERS.push({ urls: c.turn.url, username: c.turn.username, credential: c.turn.credential });
+    })
+    .catch(() => { /* sem TURN, só STUN */ });
+
+  const MAX_RESTARTS = 3;
 
   const state = {
     name: '', code: '', selfId: null,
-    peers: new Map(),          // id -> {name, role}
-    ws: null, wsOk: false, attempt: 0, reconnectTimer: null, manualExit: false,
-    pc: null, displayStream: null, micStream: null, mixer: null,
-    presenting: false, otherId: null,
-    makingOffer: false, soundOn: true, soundBlocked: false,
+    peers: new Map(),           // id -> {name, role}
+    ws: null, attempt: 0, reconnectTimer: null, manualExit: false,
+    pc: null, videoSender: null, audioSender: null,
+    displayStream: null, micStream: null, mixer: null,
+    presenting: false, otherId: null, peerSig: '',
+    makingOffer: false, soundOn: true, soundBlocked: false, restarts: 0,
   };
+
+  // Acumula as trilhas recebidas. Precisa ser UM stream só: o ontrack dispara uma
+  // vez por trilha e, se a gente atribuir srcObject a cada vez, a última (áudio)
+  // sobrescreve o vídeo e a tela fica preta.
+  const remoteStream = new MediaStream();
+  // Candidatos ICE que chegam antes do remoteDescription precisam esperar.
+  const pendingIce = [];
 
   /* ---------------- helpers ---------------- */
   function toast(msg, kind = '', ms = 3600) {
@@ -47,25 +61,17 @@
     setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 320); }, ms);
   }
 
-  function log(text, who = 'sistema') {
+  function chatNode(text, who, kind) {
     const node = el.msgTpl.content.firstElementChild.cloneNode(true);
-    node.classList.add('system');
+    if (kind) node.classList.add(kind);
     node.querySelector('.msg-who').textContent = who;
     node.querySelector('.msg-text').textContent = text;
     node.querySelector('.msg-time').textContent = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     el.chatLog.appendChild(node);
     el.chatLog.scrollTop = el.chatLog.scrollHeight;
   }
-
-  function addChat(text, who, mine) {
-    const node = el.msgTpl.content.firstElementChild.cloneNode(true);
-    if (mine) node.classList.add('me');
-    node.querySelector('.msg-who').textContent = who;
-    node.querySelector('.msg-text').textContent = text;
-    node.querySelector('.msg-time').textContent = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-    el.chatLog.appendChild(node);
-    el.chatLog.scrollTop = el.chatLog.scrollHeight;
-  }
+  const log = (text, who = 'sistema') => chatNode(text, who, 'system');
+  const addChat = (text, who, mine) => chatNode(text, who, mine ? 'me' : '');
 
   function setConn(kind, text) {
     el.connPill.classList.toggle('is-live', kind === 'live');
@@ -73,23 +79,27 @@
     el.connText.textContent = text;
   }
 
-  function roomUrl(code) {
-    return `${location.origin}/sala/${code}`;
-  }
+  const roomUrl = (code) => `${location.origin}/sala/${code}`;
 
   /* ---------------- lobby ---------------- */
   el.nameInput.value = localStorage.getItem('ct:name') || '';
 
+  function refreshLobbyLabel() {
+    const has = el.codeInput.value.trim().length > 0;
+    el.createBtnLabel.textContent = has ? 'Entrar na sala' : 'Criar uma sala';
+  }
+
   el.lobbyForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!el.nameInput.value.trim()) return el.nameInput.focus();
-    const code = (el.codeInput.value || '').trim();
+    const code = el.codeInput.value.trim();
     if (code) return joinRoom(code.toUpperCase());
-    // cria sala nova
+
     el.joinBtn.disabled = true;
     try {
       const r = await fetch('/api/salas/nova');
       const d = await r.json();
+      if (!d.room) throw new Error('sem código');
       joinRoom(d.room);
     } catch {
       joinRoom(randomCode()); // fallback: gera no cliente
@@ -99,7 +109,10 @@
   });
 
   el.joinBtn.addEventListener('click', () => el.lobbyForm.requestSubmit());
-  el.codeInput.addEventListener('input', () => { el.codeInput.value = el.codeInput.value.toUpperCase(); });
+  el.codeInput.addEventListener('input', () => {
+    el.codeInput.value = el.codeInput.value.toUpperCase();
+    refreshLobbyLabel();
+  });
 
   function randomCode() {
     const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -110,15 +123,17 @@
   const pathMatch = location.pathname.match(/^\/sala\/([A-Za-z0-9]{5})$/);
   if (pathMatch) {
     el.codeInput.value = pathMatch[1].toUpperCase();
+    refreshLobbyLabel();
     if (el.nameInput.value) el.lobbyForm.requestSubmit();
   }
 
   /* ---------------- sala ---------------- */
   function joinRoom(code) {
-    state.name = el.nameInput.value.trim().slice(0, 32);
+    state.name = el.nameInput.value.trim().slice(0, 32) || 'Anônimo';
     localStorage.setItem('ct:name', state.name);
     state.code = code;
     state.manualExit = false;
+    state.restarts = 0;
 
     el.roomCode.textContent = code;
     el.lobby.classList.add('hidden');
@@ -138,6 +153,7 @@
     try { state.ws?.close(); } catch { /* noop */ }
     state.ws = null;
     state.peers.clear();
+    state.peerSig = '';
     teardownPC();
 
     el.room.classList.add('hidden');
@@ -158,14 +174,13 @@
     let ws;
     try {
       ws = new WebSocket(`${proto}://${location.host}/sinal?sala=${encodeURIComponent(state.code)}`);
-    } catch (err) {
+    } catch {
       return scheduleReconnect();
     }
     state.ws = ws;
     setConn('off', 'conectando…');
 
     ws.onopen = () => {
-      state.wsOk = true;
       state.attempt = 0;
       setConn('live', 'online');
       ws.send(JSON.stringify({ type: 'join', name: state.name }));
@@ -178,7 +193,6 @@
     };
 
     ws.onclose = () => {
-      state.wsOk = false;
       if (!state.manualExit) {
         setConn('off', 'reconectando…');
         scheduleReconnect();
@@ -191,8 +205,7 @@
   function scheduleReconnect() {
     if (state.manualExit) return;
     state.attempt = Math.min(state.attempt + 1, 6);
-    const delay = Math.min(800 * 2 ** (state.attempt - 1), 12000);
-    state.reconnectTimer = setTimeout(connect, delay);
+    state.reconnectTimer = setTimeout(connect, Math.min(800 * 2 ** (state.attempt - 1), 12000));
   }
 
   function onSignal(m) {
@@ -201,30 +214,27 @@
         state.selfId = m.selfId;
         state.peers.clear();
         for (const p of m.peers) state.peers.set(p.id, { name: p.name, role: p.role });
-        state.peers.delete(m.selfId);
         syncOther();
+        maybePeerChange();
         refreshUI();
         break;
 
       case 'peer-joined':
         state.peers.set(m.id, { name: m.name, role: 'viewer' });
         syncOther();
+        maybePeerChange();
         refreshUI();
         log(`${m.name} entrou na sala.`);
         break;
 
       case 'peer-left': {
-        const gone = [...state.peers.entries()].find(([id]) => id === m.id);
-        if (gone) state.peers.delete(m.id);
+        const gone = state.peers.get(m.id);
+        const name = gone ? gone.name : 'Seu amigo';
+        state.peers.delete(m.id);
         syncOther();
+        maybePeerChange();
         refreshUI();
-        if (m.wasPresenter) {
-          log(`${gone ? gone[1].name : 'Seu amigo'} parou de compartilhar.`);
-          clearRemote('Seu amigo parou de compartilhar.', 'Quando ele voltar a compartilhar, aparece aqui.');
-        } else {
-          log(`${gone ? gone[1].name : 'Seu amigo'} saiu da sala.`);
-          clearRemote('Esperando seu amigo entrar…', 'Envie o link da sala pra ele.');
-        }
+        log(m.wasPresenter ? `${name} parou de compartilhar.` : `${name} saiu da sala.`);
         break;
       }
 
@@ -232,6 +242,7 @@
         state.peers.clear();
         for (const p of m.peers) if (p.id !== state.selfId) state.peers.set(p.id, { name: p.name, role: p.role });
         syncOther();
+        maybePeerChange();
         refreshUI();
         break;
 
@@ -244,8 +255,12 @@
         break;
 
       case 'stopped':
-        if (!state.presenting) clearRemote(`${m.name} parou de compartilhar.`, 'Clique em “Compartilhar minha tela” para apresentar.');
         log(`${m.name} parou de compartilhar.`);
+        if (!state.presenting) {
+          teardownPC();
+          clearRemote(`${m.name} parou de compartilhar.`, 'Clique em “Compartilhar minha tela” para apresentar.');
+          refreshUI();
+        }
         break;
 
       case 'chat':
@@ -270,44 +285,66 @@
     el.peerName.textContent = p ? `com ${p.name}` : 'só você';
   }
 
-  /* ---------------- WebRTC ---------------- */
-  // "polite" definido de forma determinística: exatamente um dos lados cede em caso de colisão.
-  function polite() {
-    return !state.otherId ? true : String(state.selfId) > String(state.otherId);
+  /**
+   * Reconstrói a conexão quando o conjunto de pessoas muda de verdade.
+   * Cobre: amigo entrou depois de eu já estar compartilhando, amigo caiu e voltou,
+   * e eu reconectei. Sem isso a oferta antiga morre no vazio e ninguém vê nada.
+   */
+  function maybePeerChange() {
+    const sig = [...state.peers.keys()].sort().join(',');
+    if (sig === state.peerSig) return;
+    state.peerSig = sig;
+    state.restarts = 0;
+    teardownPC();
+    if (state.presenting) {
+      ensurePC();
+      syncTracks().catch((e) => console.error('syncTracks', e));
+    }
+    refreshUI();
   }
+
+  /* ---------------- WebRTC ---------------- */
+  // "polite" determinístico: exatamente um dos lados cede numa colisão de ofertas.
+  const polite = () => (!state.otherId ? true : String(state.selfId) > String(state.otherId));
 
   function ensurePC() {
     if (state.pc) return state.pc;
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     state.pc = pc;
+    state.restarts = 0;
 
     pc.onicecandidate = (e) => {
       if (e.candidate) send({ type: 'ice', payload: e.candidate.toJSON() });
     };
 
-    pc.onnegotiationneeded = async () => {
-      try {
-        state.makingOffer = true;
-        await pc.setLocalDescription();
-        send({ type: 'desc', payload: pc.localDescription });
-      } catch (err) {
-        console.error('negotiation', err);
-      } finally {
-        state.makingOffer = false;
-      }
-    };
+    pc.onnegotiationneeded = () => { renegotiate(); };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed') {
-        toast('A conexão direta falhou. Tentando reabrir…', 'err');
-        restartPC();
+      const s = pc.connectionState;
+      if (s === 'connected') state.restarts = 0;
+      if (s === 'failed') {
+        if (state.restarts >= MAX_RESTARTS) {
+          toast('Não consegui reconectar. Peça pro seu amigo compartilhar de novo.', 'err', 7000);
+          return;
+        }
+        state.restarts++;
+        toast(`Conexão caiu, tentando de novo (${state.restarts}/${MAX_RESTARTS})…`, '', 3000);
+        // Sem backoff isso vira um loop infinito de ofertas.
+        setTimeout(() => {
+          if (state.pc !== pc) return;
+          teardownPC();
+          if (state.presenting) { ensurePC(); syncTracks().catch(() => {}); }
+        }, 500 * state.restarts);
       }
     };
 
+    // Uma trilha por evento. Todas vão para o MESMO stream, senão o áudio
+    // sobrescreve o vídeo no <video>.
     pc.ontrack = (e) => {
-      const [track] = e.streams[0] ? e.streams[0].getTracks() : [e.track];
-      const stream = e.streams[0] || new MediaStream([track]);
-      el.remoteVideo.srcObject = stream;
+      if (!remoteStream.getTracks().includes(e.track)) remoteStream.addTrack(e.track);
+      e.track.addEventListener('ended', () => remoteStream.removeTrack(e.track));
+      if (state.presenting) return; // quem apresenta vê a própria tela
+      el.remoteVideo.srcObject = remoteStream;
       el.overlay.classList.add('hidden');
       el.videoMeta.style.display = 'block';
       playRemote();
@@ -316,19 +353,33 @@
     return pc;
   }
 
+  async function renegotiate() {
+    const pc = state.pc;
+    if (!pc || state.makingOffer) return;
+    try {
+      state.makingOffer = true;
+      await pc.setLocalDescription();
+      send({ type: 'desc', payload: pc.localDescription });
+    } catch (err) {
+      console.error('renegotiate', err);
+    } finally {
+      state.makingOffer = false;
+    }
+  }
+
   async function playRemote() {
     const v = el.remoteVideo;
     v.muted = !state.soundOn;
     try {
       await v.play();
       state.soundBlocked = false;
-      el.soundBtn.classList.toggle('is-on', state.soundOn);
     } catch {
       state.soundBlocked = true;
       v.muted = true;
       await v.play().catch(() => {});
       toast('Toque em “Som” para ouvir o áudio.', '', 6000);
     }
+    refreshUI();
   }
 
   async function handleDescription(desc) {
@@ -338,6 +389,7 @@
     if (collision && !polite()) return; // impolite ignora a oferta concorrente
     try {
       await pc.setRemoteDescription(desc);
+      await flushIce(pc);
       if (desc.type === 'offer') {
         await pc.setLocalDescription();
         send({ type: 'desc', payload: pc.localDescription });
@@ -348,86 +400,113 @@
   }
 
   async function handleIce(candidate) {
-    if (!candidate || !state.pc) return;
-    try {
-      await state.pc.addIceCandidate(candidate);
-    } catch (err) {
-      console.warn('addIceCandidate', err.message);
+    if (!candidate) return;
+    const pc = state.pc;
+    // Candidato antes da descrição: guarda, senão ele é descartado e a conexão
+    // pode nunca fechar.
+    if (!pc || !pc.remoteDescription) {
+      if (pendingIce.length < 100) pendingIce.push(candidate);
+      return;
     }
+    try { await pc.addIceCandidate(candidate); } catch (err) { console.warn('addIceCandidate', err.message); }
+  }
+
+  async function flushIce(pc) {
+    while (pendingIce.length) {
+      const c = pendingIce.shift();
+      try { await pc.addIceCandidate(c); } catch { /* candidato obsoleto */ }
+    }
+  }
+
+  function closeMixer() {
+    if (state.mixer?.ctx) { try { state.mixer.ctx.close(); } catch { /* noop */ } }
+    state.mixer = null;
   }
 
   function teardownPC() {
     if (!state.pc) return;
-    try { state.pc.ontrack = state.pc.onicecandidate = state.pc.onnegotiationneeded = state.pc.onconnectionstatechange = null; state.pc.close(); } catch { /* noop */ }
+    const pc = state.pc;
+    pc.ontrack = pc.onicecandidate = pc.onnegotiationneeded = pc.onconnectionstatechange = null;
+    try { pc.close(); } catch { /* noop */ }
     state.pc = null;
-  }
-
-  async function restartPC() {
-    teardownPC();
-    ensurePC();
-    if (state.displayStream) await attachTracks();
+    state.videoSender = null;
+    state.audioSender = null;
+    state.makingOffer = false;
+    pendingIce.length = 0;
+    for (const t of remoteStream.getTracks()) remoteStream.removeTrack(t);
+    closeMixer();
+    if (!state.presenting) el.remoteVideo.srcObject = null;
   }
 
   /* ---------------- captura ---------------- */
   async function mixAudioTracks(tracks) {
-    if (!tracks.length) return null;
-    if (tracks.length === 1) return { track: tracks[0], ctx: null };
     const ctx = new AudioContext();
     const dest = ctx.createMediaStreamDestination();
-    for (const t of tracks) {
-      const src = ctx.createMediaStreamSource(new MediaStream([t]));
-      src.connect(dest);
-    }
+    for (const t of tracks) ctx.createMediaStreamSource(new MediaStream([t])).connect(dest);
     return { track: dest.stream.getAudioTracks()[0], ctx };
   }
 
-  async function attachTracks() {
+  /**
+   * Ajusta o que está sendo enviado. Usa replaceTrack quando os transceivers já
+   * existem — assim ligar/desligar o microfone não renegocia nada.
+   */
+  async function syncTracks() {
     const pc = ensurePC();
     const display = state.displayStream;
-    const audioTracks = [];
+    const videoTrack = display?.getVideoTracks?.()[0] || null;
 
-    const sysAudio = display?.getAudioTracks?.()[0];
-    if (sysAudio) audioTracks.push(sysAudio);
-    const micAudio = state.micStream?.getAudioTracks?.()[0];
-    if (micAudio) audioTracks.push(micAudio);
+    const sources = [];
+    const sys = display?.getAudioTracks?.()[0];
+    if (sys) sources.push(sys);
+    const mic = state.micStream?.getAudioTracks?.()[0];
+    if (mic) sources.push(mic);
 
-    // limpa senders antigos
-    for (const sender of pc.getSenders()) {
-      try { await pc.removeTrack(sender); } catch { /* noop */ }
+    let audioTrack = null;
+    if (sources.length === 1) {
+      closeMixer();
+      audioTrack = sources[0];
+    } else if (sources.length > 1) {
+      closeMixer();
+      state.mixer = await mixAudioTracks(sources);
+      audioTrack = state.mixer?.track || null;
+    } else {
+      closeMixer();
     }
 
-    const videoTrack = display?.getVideoTracks?.()[0];
-    if (videoTrack) {
-      try { videoTrack.contentHint = 'detail'; } catch { /* noop */ }
-      pc.addTrack(videoTrack, display);
+    // Cria os transceivers uma única vez (isso dispara UMA negociação).
+    let created = false;
+    if (!state.videoSender || !state.videoSender.transport || state.videoSender.transport.state === 'closed') {
+      state.videoSender = pc.addTransceiver('video', { direction: 'sendonly' }).sender;
+      created = true;
+    }
+    if (!state.audioSender || !state.audioSender.transport || state.audioSender.transport.state === 'closed') {
+      state.audioSender = pc.addTransceiver('audio', { direction: 'sendonly' }).sender;
+      created = true;
     }
 
-    if (audioTracks.length) {
-      if (state.mixer?.ctx) { try { state.mixer.ctx.close(); } catch { /* noop */ } }
-      state.mixer = await mixAudioTracks(audioTracks);
-      if (state.mixer?.track) pc.addTrack(state.mixer.track, new MediaStream([state.mixer.track]));
-    }
+    if (videoTrack) { try { videoTrack.contentHint = 'detail'; } catch { /* noop */ } }
+    await state.videoSender.replaceTrack(videoTrack);
+    await state.audioSender.replaceTrack(audioTrack);
 
-    // disparar renegociação caso onnegotiationneeded não dispare sozinho
-    if (pc.getSenders().some((s) => s.track) && pc.signalingState === 'stable') {
-      await pc.setLocalDescription();
-      send({ type: 'desc', payload: pc.localDescription });
-    }
+    // addTransceiver já agenda a negociação; só força quando nada foi criado
+    // (ex.: reconectar com as trilhas já prontas).
+    if (!created && pc.signalingState === 'stable') await renegotiate();
   }
 
   async function startPresenting() {
+    if (state.presenting) return;
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      toast('Este navegador não permite compartilhar a tela. Use o Chrome/Edge no computador.', 'err', 7000);
+      toast('Este navegador não permite compartilhar a tela. Use o Chrome ou o Edge no computador.', 'err', 7000);
       return;
     }
     if (!state.otherId) {
-      toast('Seu amigo ainda não entrou. Pode compartilhar mesmo assim — ele vê assim que entrar.', '', 5000);
+      toast('Seu amigo ainda não entrou. Pode compartilhar — ele vê assim que entrar.', '', 5000);
     }
 
     let stream;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30 }, displaySurface: 'monitor' },
+        video: { frameRate: { ideal: 30 } },
         audio: true,
         selfBrowserSurface: 'include',
         systemAudio: 'include',
@@ -438,19 +517,21 @@
     }
 
     state.displayStream = stream;
-    el.localVideo.srcObject = stream;
-    el.localPip.classList.add('on');
-
+    state.presenting = true;
     stream.getVideoTracks()[0]?.addEventListener('ended', () => stopPresenting());
 
-    state.presenting = true;
     send({ type: 'role', payload: 'presenter' });
     el.micBtn.disabled = false;
-    refreshUI();
     log('Você começou a compartilhar a tela.');
+    refreshUI();
 
-    ensurePC();
-    await attachTracks();
+    try {
+      await syncTracks();
+    } catch (err) {
+      console.error('syncTracks', err);
+      toast('Falha ao iniciar o compartilhamento.', 'err');
+      stopPresenting();
+    }
   }
 
   function stopPresenting(silent = false) {
@@ -462,9 +543,6 @@
       for (const t of state.micStream.getTracks()) { try { t.stop(); } catch { /* noop */ } }
       state.micStream = null;
     }
-    if (state.mixer?.ctx) { try { state.mixer.ctx.close(); } catch { /* noop */ } state.mixer = null; }
-    el.localPip.classList.remove('on');
-    el.localVideo.srcObject = null;
 
     if (state.presenting) {
       state.presenting = false;
@@ -473,8 +551,15 @@
       teardownPC();
       el.micBtn.disabled = true;
       el.micBtn.classList.remove('is-on');
+      el.micLabel.textContent = 'Microfone';
       if (!silent) log('Você parou de compartilhar.');
+    } else {
+      closeMixer();
     }
+
+    el.localPip.classList.remove('on');
+    el.localVideo.srcObject = null;
+    el.remoteVideo.srcObject = null;
     refreshUI();
   }
 
@@ -484,20 +569,20 @@
       for (const t of state.micStream.getTracks()) t.stop();
       state.micStream = null;
       el.micBtn.classList.remove('is-on');
+      el.micLabel.textContent = 'Microfone';
       log('Microfone desligado.');
-      await attachTracks();
-      refreshUI();
-      return;
+    } else {
+      try {
+        state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        el.micBtn.classList.add('is-on');
+        el.micLabel.textContent = 'Mic ligado';
+        log('Microfone ligado.');
+      } catch {
+        toast('Não consegui acessar o microfone.', 'err');
+        return;
+      }
     }
-    try {
-      state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      el.micBtn.classList.add('is-on');
-      log('Microfone ligado.');
-      await attachTracks();
-    } catch {
-      toast('Não consegui acessar o microfone.', 'err');
-    }
-    refreshUI();
+    try { await syncTracks(); } catch (e) { console.error(e); }
   }
 
   function clearRemote(title, sub) {
@@ -511,27 +596,38 @@
   /* ---------------- UI ---------------- */
   function refreshUI() {
     const someone = !!state.otherId;
-    el.peopleCount.textContent = String(state.peers.size + 1);
-
-    if (state.presenting) {
-      el.shareBtn.hidden = true;
-      el.shareBtnOverlay.hidden = true;
-      el.stopBtn.hidden = false;
-    } else {
-      el.shareBtn.hidden = false;
-      el.stopBtn.hidden = true;
-      el.shareBtnLabel.textContent = someone ? 'Compartilhar minha tela' : 'Compartilhar minha tela';
-      el.shareBtnOverlay.hidden = false;
-    }
-
     const other = state.otherId && state.peers.get(state.otherId);
     const remotePresenting = other?.role === 'presenter';
 
-    if (!state.presenting && !remotePresenting) {
-      if (!someone) clearRemote('Esperando seu amigo entrar…', 'Envie o link da sala pra ele.');
-      else clearRemote(`${other.name} está na sala.`, 'Você ou ele podem clicar em “Compartilhar minha tela”.');
+    el.peopleCount.textContent = String(state.peers.size + 1);
+    el.shareBtn.hidden = state.presenting;
+    el.stopBtn.hidden = !state.presenting;
+    el.soundBtn.disabled = state.presenting;
+
+    if (state.presenting) {
+      // Quem apresenta vê a própria tela em destaque (mudo, pra não dar eco).
+      el.shareBtnOverlay.hidden = true;
+      if (el.remoteVideo.srcObject !== state.displayStream) {
+        el.remoteVideo.srcObject = state.displayStream;
+        el.remoteVideo.muted = true;
+        el.remoteVideo.play().catch(() => {});
+      }
+      el.overlay.classList.add('hidden');
+      el.videoMeta.style.display = 'block';
+      el.localPip.classList.toggle('on', !!state.displayStream);
+      el.localVideo.srcObject = state.displayStream;
+    } else {
+      el.shareBtnOverlay.hidden = false;
+      el.shareBtnLabel.textContent = someone ? 'Compartilhar minha tela' : 'Testar compartilhamento';
+      el.localPip.classList.remove('on');
+      if (!remotePresenting) {
+        clearRemote(
+          someone ? `${other.name} está na sala.` : 'Esperando seu amigo entrar…',
+          someone ? 'Você ou ele podem clicar em “Compartilhar minha tela”.' : 'Envie o link da sala pra ele.',
+        );
+      }
     }
-    el.soundBtn.classList.toggle('is-on', state.soundOn && !state.soundBlocked);
+    el.soundBtn.classList.toggle('is-on', state.soundOn && !state.soundBlocked && !state.presenting);
   }
 
   async function copyLink() {
@@ -563,8 +659,8 @@
     if (state.soundOn) {
       try { await el.remoteVideo.play(); state.soundBlocked = false; } catch { /* noop */ }
     }
-    el.soundBtn.classList.toggle('is-on', state.soundOn && !state.soundBlocked);
     el.soundLabel.textContent = state.soundOn ? 'Som' : 'Sem som';
+    refreshUI();
   });
 
   el.fsBtn.addEventListener('click', async () => {
@@ -585,22 +681,24 @@
   });
 
   window.addEventListener('beforeunload', () => { if (state.presenting) send({ type: 'stopped' }); });
-  document.addEventListener('visibilitychange', () => { /* conexão segue ativa em segundo plano */ });
+
+  /* hook de depuração/testes */
+  window.__ct = state;
+  window.__ctRemote = remoteStream;
 
   /* ---------------- estatísticas ---------------- */
   let lastBytes = 0;
   let lastTs = 0;
   setInterval(async () => {
-    if (!state.pc || el.videoMeta.style.display === 'none') return;
+    if (!state.pc) return;
     try {
       const stats = await state.pc.getStats();
       const kind = state.presenting ? 'outbound-rtp' : 'inbound-rtp';
       for (const r of stats.values()) {
         if (r.type !== kind || r.kind !== 'video') continue;
         const bytes = r.bytesSent ?? r.bytesReceived ?? 0;
-        const now = r.timestamp;
-        const kbps = lastTs ? Math.max(0, Math.round(((bytes - lastBytes) * 8) / (now - lastTs))) : 0;
-        lastBytes = bytes; lastTs = now;
+        const kbps = lastTs ? Math.max(0, Math.round(((bytes - lastBytes) * 8) / (r.timestamp - lastTs))) : 0;
+        lastBytes = bytes; lastTs = r.timestamp;
         const w = r.frameWidth || 0;
         const h = r.frameHeight || 0;
         const fps = Math.round(r.framesPerSecond || 0);
@@ -609,5 +707,6 @@
     } catch { /* noop */ }
   }, 2000);
 
+  refreshLobbyLabel();
   refreshUI();
 })();

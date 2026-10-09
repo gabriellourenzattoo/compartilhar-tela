@@ -93,6 +93,12 @@ test('GET /api/salas/nova devolve um código válido', async () => {
   assert.match(room, new RegExp(`^[A-Z0-9]{${CODE_LEN}}$`));
 });
 
+test('GET /config devolve TURN nulo quando não configurado', async () => {
+  const res = await get('/config');
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { turn: null });
+});
+
 test('GET /sala/:code entrega o app, código inválido dá 400', async () => {
   const ok = await get('/sala/ABC2D');
   assert.equal(ok.status, 200);
